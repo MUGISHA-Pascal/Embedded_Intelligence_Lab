@@ -13,7 +13,7 @@ def preprocess_image(image):
 
 # Function to select ROI and apply OCR
 def recognize_number_plate(image_path):
-    # Load the image from the provided file path
+    # Load the image from the provided file pathFIY
     image = cv2.imread(image_path)
 
     if image is None:
