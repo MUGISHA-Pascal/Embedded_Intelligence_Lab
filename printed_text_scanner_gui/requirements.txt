@@ -1,3 +1,5 @@
-pytesseract
-opencv-python
-PyQt5
+PyQt5>=5.15.0
+pytesseract>=0.3.10
+opencv-python>=4.8.0
+Pillow>=9.0.0
+numpy>=1.21.0
