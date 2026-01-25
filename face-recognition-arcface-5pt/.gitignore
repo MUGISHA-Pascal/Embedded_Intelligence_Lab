@@ -1,0 +1,6 @@
+# Large files
+data/enroll/*.jpg
+data/db/face_db.npz
+models/embedder_arcface.onnx
+__pycache__/
+.venv/
