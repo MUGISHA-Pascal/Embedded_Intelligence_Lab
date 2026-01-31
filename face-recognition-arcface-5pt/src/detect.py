@@ -1,4 +1,3 @@
-# src/detect.py
 import cv2
 
 def main():
@@ -6,11 +5,11 @@ def main():
     face = cv2.CascadeClassifier(cascade_path)
     if face.empty():
         raise RuntimeError(f"Failed to load cascade: {cascade_path}")
-
+    
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Camera not opened. Try camera index 0/1/2.")
-
+    
     print("Haar face detect (minimal). Press 'q' to quit.")
     while True:
         ok, frame = cap.read()
@@ -36,6 +35,6 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-
+    
 if __name__ == "__main__":
     main()

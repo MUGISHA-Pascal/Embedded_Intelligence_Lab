@@ -10,40 +10,64 @@ camera
 -> vector visualization (education)
 
 Run:
- python -m src.embed
+python -m src.embed
 
 Keys:
- q : quit
- p : print embedding stats to terminal
+q : quit
+p : print embedding stats to terminal
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple, Optional
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 import time
 import cv2
 import numpy as np
 import onnxruntime as ort
+from math import ceil
 
 from .haar_5pt import Haar5ptDetector, align_face_5pt
 
+# Resolve model path: project_root/models/embedder_arcface.onnx (works from any cwd)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_MODEL_PATH = _PROJECT_ROOT / "models" / "embedder_arcface.onnx"
 
-# -------------------------
+# ArcFace ONNX 112x112 embedder – auto-download if missing or empty (e.g. after init_project)
+_ARCFACE_ONNX_URL = "https://huggingface.co/garavv/arcface-onnx/resolve/main/arc.onnx"
+
+
+def _download_arcface_model(dest: Path) -> bool:
+    """Download ArcFace ONNX to dest. Returns True on success."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        req = Request(_ARCFACE_ONNX_URL, headers={"User-Agent": "Python-urllib"})
+        with urlopen(req, timeout=60) as resp:
+            data = resp.read()
+        if len(data) < 100:
+            return False
+        dest.write_bytes(data)
+        return True
+    except (URLError, OSError, Exception):
+        return False
+
+# ---
 # Data
-# -------------------------
+# ---
 
 @dataclass
 class EmbeddingResult:
-    embedding: np.ndarray   # (D,) float32, L2-normalized
+    embedding: np.ndarray  # (D,) float32, L2-normalized
     norm_before: float
     dim: int
 
-
-# -------------------------
+# ---
 # Embedder
-# -------------------------
+# ---
 
 class ArcFaceEmbedderONNX:
     """
@@ -54,20 +78,63 @@ class ArcFaceEmbedderONNX:
 
     def __init__(
         self,
-        model_path: str = "models/embedder_arcface.onnx",
+        model_path: Optional[str] = None,
         input_size: Tuple[int, int] = (112, 112),
         debug: bool = False,
     ):
         self.in_w, self.in_h = input_size
         self.debug = debug
 
-        self.sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-        self.in_name = self.sess.get_inputs()[0].name
+        path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
+        if not path.is_absolute():
+            path = _PROJECT_ROOT / path
+        path = path.resolve()
+
+        # Auto-download if missing or empty (e.g. placeholder from init_project)
+        if not path.exists() or path.stat().st_size < 100:
+            if self.debug:
+                print("[embed] Model missing or empty, attempting download...")
+            if _download_arcface_model(path):
+                if self.debug:
+                    print("[embed] Downloaded ArcFace ONNX to", path)
+            else:
+                if not path.exists():
+                    raise FileNotFoundError(
+                        f"ArcFace ONNX model not found: {path}\n"
+                        "Download failed. Get an ArcFace ONNX (112x112) and save as models/embedder_arcface.onnx\n"
+                        f"Or try manually: {_ARCFACE_ONNX_URL}"
+                    )
+                raise ValueError(
+                    f"ArcFace model file is empty or invalid: {path} ({path.stat().st_size} bytes).\n"
+                    "Delete it and run again to auto-download, or download a valid ONNX and save as models/embedder_arcface.onnx"
+                )
+        try:
+            self.sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        except Exception as e:
+            err = str(e)
+            if "ModelProto does not have a graph" in err or "does not have a graph" in err.lower():
+                raise ValueError(
+                    f"Invalid or corrupted ONNX model: {path}\n"
+                    "The file is not a valid ONNX model (empty or wrong format). "
+                    "Download a valid ArcFace ONNX embedder and save as models/embedder_arcface.onnx"
+                ) from e
+            raise
+        inp = self.sess.get_inputs()[0]
+        self.in_name = inp.name
         self.out_name = self.sess.get_outputs()[0].name
+        # Many ArcFace ONNX (e.g. garavv) expect NHWC (batch, H, W, C); others NCHW (batch, C, H, W)
+        shape = getattr(inp, "shape", []) or []
+        try:
+            # shape like [1, 112, 112, 3] -> NHWC; [1, 3, 112, 112] -> NCHW
+            dim1 = int(shape[1]) if len(shape) > 1 else None
+            self._input_nhwc = dim1 == self.in_h or dim1 == 112  # second dim is height -> NHWC
+        except (TypeError, ValueError):
+            self._input_nhwc = True  # default NHWC for garavv/arcface-onnx
 
         if debug:
             print("[embed] model loaded")
-            print("[embed] input:", self.sess.get_inputs()[0].shape)
+            print("[embed] input:", inp.shape, "layout:", "NHWC" if self._input_nhwc else "NCHW")
+            print("[embed] output:", self.sess.get_outputs()[0].shape)
 
     def _preprocess(self, aligned_bgr: np.ndarray) -> np.ndarray:
         if aligned_bgr.shape[:2] != (self.in_h, self.in_w):
@@ -75,8 +142,10 @@ class ArcFaceEmbedderONNX:
 
         rgb = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
         rgb = (rgb - 127.5) / 128.0
-        # Keep HWC format (channels last) for this model
-        x = rgb[None, ...]  # Add batch dimension: (1, 112, 112, 3)
+        if self._input_nhwc:
+            x = rgb[None, ...]  # (1, H, W, C) NHWC
+        else:
+            x = np.transpose(rgb, (2, 0, 1))[None, ...]  # (1, C, H, W) NCHW
         return x.astype(np.float32)
 
     @staticmethod
@@ -91,17 +160,15 @@ class ArcFaceEmbedderONNX:
         v_norm, n0 = self._l2_normalize(v)
         return EmbeddingResult(v_norm, n0, v_norm.size)
 
-
-# -------------------------
+# ---
 # Visualization helpers
-# -------------------------
+# ---
 
 def draw_text_block(img, lines, origin=(10, 30), scale=0.7, color=(0, 255, 0)):
     x, y = origin
     for line in lines:
         cv2.putText(img, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2)
         y += int(28 * scale)
-
 
 def draw_embedding_matrix(
     img: np.ndarray,
@@ -114,8 +181,8 @@ def draw_embedding_matrix(
     Visualize embedding vector as a heatmap matrix.
     """
     D = emb.size
-    cols = int(np.ceil(np.sqrt(D)))
-    rows = int(np.ceil(D / cols))
+    cols = int(ceil(np.sqrt(D)))
+    rows = int(ceil(D / cols))
 
     mat = np.zeros((rows, cols), dtype=np.float32)
     mat.flat[:D] = emb
@@ -149,19 +216,16 @@ def draw_embedding_matrix(
     )
     return w, h
 
-
 def emb_preview_str(emb: np.ndarray, n: int = 8) -> str:
-    vals = " ".join(f"{v:+.3f}" for v in emb[:n])
+    vals = " ".join(f"{v:.3f}" for v in emb[:n])
     return f"vec[0:{n}]: {vals} ..."
-
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b))
 
-
-# -------------------------
+# ---
 # Demo
-# -------------------------
+# ---
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -172,10 +236,7 @@ def main():
         debug=False,
     )
 
-    emb_model = ArcFaceEmbedderONNX(
-        model_path="models/embedder_arcface.onnx",
-        debug=False,
-    )
+    emb_model = ArcFaceEmbedderONNX(debug=False)
 
     prev_emb: Optional[np.ndarray] = None
 
@@ -220,7 +281,7 @@ def main():
             h, w = vis.shape[:2]
             vis[10:170, w-170:w-10] = aligned_small
 
-            # --------- VISUALIZATION LAYOUT ---------
+            # --- VISUALIZATION LAYOUT ---
             draw_text_block(vis, info, origin=(10, 30))
 
             HEAT_X, HEAT_Y = 10, 220
@@ -244,7 +305,6 @@ def main():
                     (200, 200, 200),
                     2,
                 )
-
         else:
             draw_text_block(vis, ["no face"], origin=(10, 30), color=(0, 0, 255))
 
@@ -265,13 +325,12 @@ def main():
             break
         elif key == ord("p") and prev_emb is not None:
             print("[embedding]")
-            print(" dim:", prev_emb.size)
-            print(" min/max:", prev_emb.min(), prev_emb.max())
-            print(" first10:", prev_emb[:10])
+            print("dim:", prev_emb.size)
+            print("min/max:", prev_emb.min(), prev_emb.max())
+            print("first10:", prev_emb[:10])
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
