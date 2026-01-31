@@ -4,12 +4,10 @@ Alignment demo using your WORKING pipeline:
 - Haar face detection (fast)
 - MediaPipe FaceMesh -> 5 keypoints (stable)
 - ArcFace-style 5pt alignment -> 112x112 (or any size you set)
-
-This avoids the bug in haar 5pt.py where the aligned window was shown only after the loop and using stale variables.
-
+This avoids the bug in haar_5pt.py where the aligned window was shown
+only after the loop and using stale variables.
 Run:
 python -m src.align
-
 Keys:
 q quit
 s save current aligned face to data/debug_aligned/<timestamp>.jpg
@@ -28,13 +26,25 @@ import numpy as np
 # Import from your existing script
 from .haar_5pt import Haar5ptDetector, align_face_5pt
 
+
 def _put_text(img, text: str, xy=(10, 30), scale=0.8, thickness=2):
-    cv2.putText(img, text, xy, cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    cv2.putText(
+        img,
+        text,
+        xy,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+
 
 def _safe_imshow(win: str, img: np.ndarray):
     if img is None:
         return
     cv2.imshow(win, img)
+
 
 def main(
     cam_index: int = 0,
@@ -57,6 +67,7 @@ def main(
     save_dir.mkdir(parents=True, exist_ok=True)
 
     last_aligned = blank.copy()
+
     fps_t0 = time.time()
     fps_n = 0
     fps = 0.0
@@ -72,7 +83,6 @@ def main(
             frame = cv2.flip(frame, 1)
 
         faces = det.detect(frame, max_faces=1)
-
         vis = frame.copy()
         aligned = None
 
@@ -81,7 +91,8 @@ def main(
 
             # Draw box + 5 pts
             cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (0, 255, 0), 2)
-            for (x, y) in f.kps.astype(int):
+
+            for x, y in f.kps.astype(int):
                 cv2.circle(vis, (int(x), int(y)), 3, (0, 255, 0), -1)
 
             # Align (this is the whole point)
@@ -91,7 +102,13 @@ def main(
             if aligned is not None and aligned.size:
                 last_aligned = aligned
 
-            _put_text(vis, "OK (Haar + FaceMesh 5pt)", (10, 30), 0.75, 2)
+            _put_text(
+                vis,
+                "OK (Haar + FaceMesh 5pt)",
+                (10, 30),
+                0.75,
+                2,
+            )
         else:
             _put_text(vis, "no face", (10, 30), 0.9, 2)
 
@@ -102,8 +119,15 @@ def main(
             fps = fps_n / dt
             fps_n = 0
             fps_t0 = time.time()
+
         _put_text(vis, f"FPS: {fps:.1f}", (10, 60), 0.75, 2)
-        _put_text(vis, f"warp: 5pt -> {out_w}:{out_h}", (10, 90), 0.75, 2)
+        _put_text(
+            vis,
+            f"warp: 5pt -> {out_w}x{out_h}",
+            (10, 90),
+            0.75,
+            2,
+        )
 
         _safe_imshow("align - camera", vis)
         _safe_imshow("align - aligned", last_aligned)
@@ -115,10 +139,11 @@ def main(
             ts = int(time.time() * 1000)
             out_path = save_dir / f"{ts}.jpg"
             cv2.imwrite(str(out_path), last_aligned)
-            print(f"aligned saved: {out_path}")
+            print(f"[align] saved: {out_path}")
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
