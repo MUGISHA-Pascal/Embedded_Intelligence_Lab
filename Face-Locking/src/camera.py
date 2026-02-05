@@ -1,29 +1,19 @@
-# src/camera.py
+from typing import Generator
+
 import cv2
 
 
-def main():
-    cap = cv2.VideoCapture(0)
-
+def camera_stream(camera_index: int = 0) -> Generator[cv2.Mat, None, None]:
+    """Yield frames from the webcam until it is closed."""
+    cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
-        raise RuntimeError("Camera not opened. Try changing index (0/1/2).")
+        raise RuntimeError("Unable to open webcam")
 
-    print("Camera test. Press 'q' to quit.")
-
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            print("Failed to read frame.")
-            break
-
-        cv2.imshow("Camera Test", frame)
-
-        if (cv2.waitKey(1) & 0xFF) == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    main()
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            yield frame
+    finally:
+        cap.release()

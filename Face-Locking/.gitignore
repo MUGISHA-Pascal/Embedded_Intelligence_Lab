@@ -1,4 +1,43 @@
-.venv
-data/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
 
+# Virtual environments
+face_env/
+.venv/
+venv/
 
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Model + data artifacts (keep folder via .gitkeep)
+models/*.onnx
+models/*.tar.gz
+data/identities/**
+!data/identities/.gitkeep
+
+# Action history logs
+action_history/
+*.txt
+
+# Sample photos and personal images
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# Enrolled identity data (keep structure only)
+data/identities/*
+!data/identities/.gitkeep
+
+# Logs
+*.log
