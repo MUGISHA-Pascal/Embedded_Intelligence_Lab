@@ -184,7 +184,8 @@ class ArcFaceEmbedderONNX:
             )
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
         rgb = (rgb - 127.5) / 128.0
-        x = np.transpose(rgb, (2, 0, 1))[None, ...]
+        # Keep channels last: (H, W, C) -> (1, H, W, C)
+        x = rgb[None, ...]
         return x.astype(np.float32)
 
     @staticmethod

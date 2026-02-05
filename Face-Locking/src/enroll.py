@@ -29,8 +29,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
-from .haar_5pt import Haar5ptDetector, align_face_5pt
-from .embed import ArcFaceEmbedderONNX
+
+# Handle both direct execution and module import
+try:
+    from .haar_5pt import Haar5ptDetector, align_face_5pt
+    from .embed import ArcFaceEmbedderONNX
+except ImportError:
+    from haar_5pt import Haar5ptDetector, align_face_5pt
+    from embed import ArcFaceEmbedderONNX
 
 
 # -------------------------
