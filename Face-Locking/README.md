@@ -1,49 +1,156 @@
-# FaceLocking — README
+# Face Locking System
 
-A short reference for how face locking works, which actions are detected, and how history files are named and stored.
+Real-time face tracking that locks onto a specific person and detects their actions (blinking, smiling, head movements).
 
----
-
-## How face locking works 
-
-- Pipeline: **camera → Haar face detection → FaceMesh (5pt) → alignment (112×112)** → **ArcFace ONNX** embedding → **cosine-distance match** against `data/db/face_db.npz`.
-- Lock acquisition: when the matcher finds the configured identity (the `--lock-name`) with distance below the matching threshold (see `--dist-thr`), the system transitions from **IDLE** → **LOCKED** and begins tracking that face.
-- Locked state: the face box is tracked by spatial continuity; the system checks for actions inside the locked ROI and logs them. If the locked face disappears for more than `--unlock-timeout` seconds, the lock is released (auto-unlock). Manual unlock can also be triggered by pressing `u`.
-
-> Tip: recognition thresholds and timeouts can be tuned via command-line args to `face_lock.py` (e.g., `--dist-thr`, `--blink-thr`, `--smile-thr`, `--unlock-timeout`).
+**See [GUIDE.md](GUIDE.md) for quick start guide**
 
 ---
 
-## Which actions are detected 
+## Quick Setup
 
-All actions are detected only for the currently **LOCKED** ROI.
+### 1. Activate Virtual Environment (if using one)
 
-- `lock_acquired` – when the configured identity is recognized and a lock is established (logs similarity and distance).
-- `lock_released` – when the lock is released (reason: `manual` when pressing `u`, or `timeout` when the person disappears).
-- `eye_blink` – detected via Eye Aspect Ratio (EAR) falling below `--blink-thr` (default 0.20). Description includes `EAR=<value>`.
-- `smile` – detected via Mouth Aspect Ratio (MAR) exceeding `--smile-thr` (default 0.60). Description includes `MAR=<value>`.
-- `moved_left` / `moved_right` – detected when the face center displaces horizontally beyond a fraction of the frame width (defaults: trigger 3% of frame width, reset 1.5%). Description includes `dx=<pixels>`.
+```bash
+source face_env/bin/activate  # macOS/Linux
+# OR
+face_env\Scripts\activate.bat  # Windows
+```
 
-Each detected action is immediately appended to the active history file with a short textual description.
+### 2. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Or manually:
+
+```bash
+pip install opencv-python numpy onnxruntime mediapipe==0.10.9 pillow
+```
+
+### 3. Download Model
+
+```bash
+curl -L -o models/arcface.onnx \
+  https://huggingface.co/onnxmodelzoo/arcfaceresnet100-8/resolve/main/arcfaceresnet100-8.onnx
+```
+
+### 4. Run
+
+```bash
+python3 main.py
+```
+
+That's it! The system will guide you through enrollment and face locking.
 
 ---
 
-## How history files are named and stored 
+## Usage
 
-- Directory: `data/history/` (created automatically when a lock is acquired).
-- File name format: `<person>_history_<YYYYMMDDHHMMSS><mmm>.txt` — for example: `joyeuse_history_20260131214841300.txt` (where the last three digits are milliseconds).
-- File contents / per-line format: `YYYY-MM-DDTHH:MM:SS.mmmZ, <action>, <desc>` (UTC; `Z` denotes UTC)
-  - Example line: `2026-01-31T21:48:41.300Z, eye_blink, EAR=0.12`
-- A new file is created on the first lock acquisition for the session and events are appended throughout the session.
+### Simple Workflow
+
+```bash
+python3 main.py
+```
+
+The system will:
+
+1. Check if you have enrolled faces
+2. If not, automatically start enrollment (live camera capture)
+3. If yes, let you choose:
+   - Lock onto existing face
+   - Enroll a new face
+
+### What It Does
+
+- **Locks onto your face** even when others are in frame
+- **Detects actions** in real-time:
+  - Blinking
+  - Smiling
+  - Head movements (left/right)
+- **Logs everything** to `action_history/` with timestamps
+
+### Visual Indicators
+
+- **Red box** = Locked on you
+- **Cyan box** = Other people
+- **Green banner** = Lock status + action counts
+
+### Controls
+
+- Press **'q'** to quit
 
 ---
 
-## Related files & locations 
+## How to Trigger Actions
 
-- Enrollment outputs: `data/db/face_db.npz` (binary embeddings) and `data/db/face_db.json` (metadata). See `src/enroll.py`.
-- Saved aligned crops: `data/enroll/<name>/*.jpg` — capture filenames use millisecond timestamps (e.g., `1650000000000.jpg`).
-- History files: `data/history/` (see above).
-- Model: `models/embedder_arcface.onnx` used to produce embeddings.
+| Action         | How to Do It                   |
+| -------------- | ------------------------------ |
+| **Blink**      | Close eyes deliberately        |
+| **Smile**      | Smile naturally (lift corners) |
+| **Move Left**  | Move head slowly left          |
+| **Move Right** | Move head slowly right         |
+
+**All actions now use the same accurate detection method!**
+
+**Tips for Best Results:**
+
+- **Good lighting** - Face should be well-lit from front
+- **Face camera** - Look directly at camera
+- **Distance** - Stay 2-3 feet from camera
+- **Deliberate actions** - Make clear, intentional movements
+
+**Tuning:** See [TUNING.md](TUNING.md) to adjust sensitivity
 
 ---
-Made by Mugisha Pascal
+
+## File Structure
+
+```
+Face_Locking/
+├── main.py                    # Main entry point (run this!)
+├── live_enroll.py             # Live camera enrollment
+├── enroll_me.py               # Photo-based enrollment (optional)
+├── setup.sh / setup.bat       # Automated setup scripts
+├── src/
+│   ├── run_pipeline.py        # Face locking system
+│   ├── action_detector.py     # Action detection
+│   ├── face_locker.py         # Lock management
+│   └── ...                    # Other modules
+├── models/
+│   └── arcface.onnx           # Face recognition model
+├── data/identities/           # Enrolled faces
+└── action_history/            # Action logs
+```
+
+---
+
+## Troubleshooting
+
+**Camera won't open?**
+
+- Check camera permissions
+- Close other apps using camera
+
+**Actions not detected?**
+
+- Better lighting
+- More deliberate movements
+- Face camera directly
+
+**Multiple faces in frame?**
+
+- System locks only on selected person
+- Others shown with cyan boxes
+
+---
+
+## Requirements
+
+- Python 3.8+
+- Webcam
+- No GPU needed (CPU only)
+
+---
+
+**Built for Intelligent Robotics Course**

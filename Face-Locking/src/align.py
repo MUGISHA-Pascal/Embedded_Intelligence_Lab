@@ -1,149 +1,97 @@
-# src/align.py
-"""
-Alignment demo using your WORKING pipeline:
-- Haar face detection (fast)
-- MediaPipe FaceMesh -> 5 keypoints (stable)
-- ArcFace-style 5pt alignment -> 112x112 (or any size you set)
-This avoids the bug in haar_5pt.py where the aligned window was shown
-only after the loop and using stale variables.
-Run:
-python -m src.align
-Keys:
-q quit
-s save current aligned face to data/debug_aligned/<timestamp>.jpg
-"""
-
-from __future__ import annotations
-
-import os
-import time
-from pathlib import Path
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 import cv2
+import mediapipe as mp
 import numpy as np
 
-# Import from your existing script
-from .haar_5pt import Haar5ptDetector, align_face_5pt
+ARC_FACE_TEMPLATE = np.array(
+    [
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ],
+    dtype=np.float32,
+)
+
+LANDMARK_INDEXES = [33, 263, 1, 61, 291]  # left eye, right eye, nose, mouth left, mouth right
 
 
-def _put_text(img, text: str, xy=(10, 30), scale=0.8, thickness=2):
-    cv2.putText(
-        img,
-        text,
-        xy,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        (255, 255, 255),
-        thickness,
-        cv2.LINE_AA,
-    )
+def _extract_landmarks(landmarks, width: int, height: int) -> np.ndarray:
+    points = []
+    for idx in LANDMARK_INDEXES:
+        lm = landmarks.landmark[idx]
+        points.append([lm.x * width, lm.y * height])
+    return np.array(points, dtype=np.float32)
 
 
-def _safe_imshow(win: str, img: np.ndarray):
-    if img is None:
-        return
-    cv2.imshow(win, img)
+def _landmarks_bbox(points: np.ndarray) -> Tuple[int, int, int, int]:
+    x1, y1 = np.min(points, axis=0)
+    x2, y2 = np.max(points, axis=0)
+    return int(x1), int(y1), int(x2), int(y2)
 
 
-def main(
-    cam_index: int = 0,
-    out_size: Tuple[int, int] = (112, 112),
-    mirror: bool = True,
-):
-    cap = cv2.VideoCapture(cam_index)
-
-    det = Haar5ptDetector(
-        min_size=(70, 70),
-        smooth_alpha=0.80,
-        debug=True,
-    )
-
-    out_w, out_h = int(out_size[0]), int(out_size[1])
-    blank = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-
-    # Where to save aligned snapshots
-    save_dir = Path("data/debug_aligned")
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    last_aligned = blank.copy()
-
-    fps_t0 = time.time()
-    fps_n = 0
-    fps = 0.0
-
-    print("align running. Press 'q' to quit, 's' to save aligned face.")
-
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-
-        if mirror:
-            frame = cv2.flip(frame, 1)
-
-        faces = det.detect(frame, max_faces=1)
-        vis = frame.copy()
-        aligned = None
-
-        if faces:
-            f = faces[0]
-
-            # Draw box + 5 pts
-            cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (0, 255, 0), 2)
-
-            for x, y in f.kps.astype(int):
-                cv2.circle(vis, (int(x), int(y)), 3, (0, 255, 0), -1)
-
-            # Align (this is the whole point)
-            aligned, _M = align_face_5pt(frame, f.kps, out_size=out_size)
-
-            # Keep last good aligned (so window doesn't go black on brief misses)
-            if aligned is not None and aligned.size:
-                last_aligned = aligned
-
-            _put_text(
-                vis,
-                "OK (Haar + FaceMesh 5pt)",
-                (10, 30),
-                0.75,
-                2,
-            )
-        else:
-            _put_text(vis, "no face", (10, 30), 0.9, 2)
-
-        # FPS
-        fps_n += 1
-        dt = time.time() - fps_t0
-        if dt >= 1.0:
-            fps = fps_n / dt
-            fps_n = 0
-            fps_t0 = time.time()
-
-        _put_text(vis, f"FPS: {fps:.1f}", (10, 60), 0.75, 2)
-        _put_text(
-            vis,
-            f"warp: 5pt -> {out_w}x{out_h}",
-            (10, 90),
-            0.75,
-            2,
-        )
-
-        _safe_imshow("align - camera", vis)
-        _safe_imshow("align - aligned", last_aligned)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        if key == ord("s"):
-            ts = int(time.time() * 1000)
-            out_path = save_dir / f"{ts}.jpg"
-            cv2.imwrite(str(out_path), last_aligned)
-            print(f"[align] saved: {out_path}")
-
-    cap.release()
-    cv2.destroyAllWindows()
+def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0, inter_x2 - inter_x1)
+    inter_h = max(0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - inter_area
+    if union == 0:
+        return 0.0
+    return inter_area / union
 
 
-if __name__ == "__main__":
-    main()
+def align_face(
+    image_bgr: cv2.Mat,
+    face_box: Tuple[int, int, int, int],
+    output_size: int = 112,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Align a face to 112x112 using 5-point landmarks from MediaPipe FaceMesh."""
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    height, width = image_bgr.shape[:2]
+
+    with mp.solutions.face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=5,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    ) as face_mesh:
+        results = face_mesh.process(image_rgb)
+
+    if not results.multi_face_landmarks:
+        return None
+
+    best_points = None
+    best_iou = 0.0
+    for landmarks in results.multi_face_landmarks:
+        points = _extract_landmarks(landmarks, width, height)
+        lm_box = _landmarks_bbox(points)
+        iou = _bbox_iou(face_box, lm_box)
+        if iou > best_iou:
+            best_iou = iou
+            best_points = points
+
+    if best_points is None:
+        return None
+
+    src = best_points.astype(np.float32)
+    dst = ARC_FACE_TEMPLATE.copy()
+    dst[:, 0] = dst[:, 0] * (output_size / 112)
+    dst[:, 1] = dst[:, 1] * (output_size / 112)
+
+    transform, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.LMEDS)
+    if transform is None:
+        return None
+
+    aligned = cv2.warpAffine(image_bgr, transform, (output_size, output_size), borderValue=0.0)
+    return aligned, src
