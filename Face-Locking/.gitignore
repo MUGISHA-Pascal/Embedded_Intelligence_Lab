@@ -1,4 +1,14 @@
-.venv
-data/
+# Large files
+data/enroll/*.jpg
+data/db/face_db.npz
+models/embedder_arcface.onnx
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
+# Virtual environment
+.venv/
+venv/
