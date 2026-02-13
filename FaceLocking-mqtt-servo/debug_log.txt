@@ -1,0 +1,3 @@
+2ce15f8 feat: Add Arcface embedder model and modules (large models excluded)
+99bbebd Add large models via Git LFS
+b12fdd3 Fix: remove large model file and update gitignore

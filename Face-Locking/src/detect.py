@@ -1,30 +1,40 @@
-from typing import List, Tuple
-
 import cv2
-import mediapipe as mp
 
+def main():
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    face = cv2.CascadeClassifier(cascade_path)
+    if face.empty():
+        raise RuntimeError(f"Failed to load cascade: {cascade_path}")
+    
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Camera not opened. Try camera index 0/1/2.")
+    
+    print("Haar face detect (minimal). Press 'q' to quit.")
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
 
-def detect_faces(image_bgr: cv2.Mat, min_confidence: float = 0.5) -> List[Tuple[int, int, int, int]]:
-    """Detect faces and return bounding boxes (x1, y1, x2, y2)."""
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    height, width = image_bgr.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    with mp.solutions.face_detection.FaceDetection(
-        model_selection=1,
-        min_detection_confidence=min_confidence,
-    ) as detector:
-        results = detector.process(image_rgb)
+        # minimal but practical defaults
+        faces = face.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(60, 60),
+        )
 
-    boxes: List[Tuple[int, int, int, int]] = []
-    if not results.detections:
-        return boxes
+        for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-    for detection in results.detections:
-        bbox = detection.location_data.relative_bounding_box
-        x1 = int(bbox.xmin * width)
-        y1 = int(bbox.ymin * height)
-        x2 = int((bbox.xmin + bbox.width) * width)
-        y2 = int((bbox.ymin + bbox.height) * height)
-        boxes.append((x1, y1, x2, y2))
+        cv2.imshow("Face Detection", frame)
+        if (cv2.waitKey(1) & 0xFF) == ord("q"):
+            break
 
-    return boxes
+    cap.release()
+    cv2.destroyAllWindows()
+    
+if __name__ == "__main__":
+    main()

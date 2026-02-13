@@ -1,0 +1,4 @@
+opencv-contrib-python
+flask
+paho-mqtt
+numpy

@@ -1,0 +1,13 @@
+{
+  "name": "vision-control-backend",
+  "version": "1.0.0",
+  "description": "Backend for Distributed Vision Control System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "mqtt": "^4.0.0",
+    "ws": "^8.0.0"
+  }
+}

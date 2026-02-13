@@ -1,0 +1,12 @@
+*.onnx
+*.zip
+venv/Lib/site-packages/absl/flags/__pycache__/_helpers.cpython-313.pyc
+venv/
+venv310/
+db/
+enroll/
+node_modules/
+*.pdf
+dp.txt
+models/
+.venv
