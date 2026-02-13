@@ -1,7 +1,7 @@
+opencv-python
+numpy
 onnxruntime
 scipy
 tqdm
-opencv-python==4.10.0.84
-opencv-contrib-python==4.10.0.84
-mediapipe==0.10.14
-numpy>=1.21.0
+# MediaPipe: 0.10.21 works with Python 3.9–3.12; if "no attribute 'solutions'" use Python 3.11 or fallback (bbox 5pt) is used
+mediapipe>=0.10.21
