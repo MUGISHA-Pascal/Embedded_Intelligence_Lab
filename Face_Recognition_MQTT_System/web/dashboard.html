@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Face Tracking Dashboard</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"
+      type="text/javascript"
+    ></script>
+    <style>
+      body {
+        background-color: #1a202c;
+        color: #e2e8f0;
+        font-family: "Inter", sans-serif;
+      }
+      .camera-feed {
+        width: 100%;
+        max-width: 800px;
+        border-radius: 8px;
+        box-shadow:
+          0 4px 6px -1px rgba(0, 0, 0, 0.1),
+          0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      }
+      .status-card {
+        background-color: #2d3748;
+        padding: 1.5rem;
+        border-radius: 8px;
+      }
+      .status-label {
+        font-size: 0.875rem;
+        color: #a0aec0;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .status-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body class="flex flex-col items-center justify-center min-h-screen p-4">
+    <h1 class="text-3xl font-bold mb-8 text-indigo-400">
+      Live Face Recognition System
+    </h1>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 w-full max-w-6xl">
+      <!-- Video Feed Section -->
+      <div class="lg:col-span-2 flex flex-col items-center">
+        <div
+          class="relative w-full aspect-video bg-black rounded-lg overflow-hidden"
+        >
+          <img
+            src="/video_feed"
+            alt="Live Camera Feed"
+            class="object-cover w-full h-full"
+          />
+          <div
+            class="absolute top-4 left-4 bg-red-600 text-white text-xs px-2 py-1 rounded animate-pulse"
+          >
+            LIVE
+          </div>
+        </div>
+        <p class="mt-4 text-gray-400 text-sm">
+          streaming from local camera source
+        </p>
+      </div>
+
+      <!-- Status Panel -->
+      <div class="flex flex-col gap-4">
+        <div class="status-card">
+          <div class="status-label">System Status</div>
+          <div id="mqtt-status" class="status-value text-yellow-400">
+            Connecting...
+          </div>
+        </div>
+
+        <div class="status-card">
+          <div class="status-label">Detected Person</div>
+          <div id="person-name" class="status-value text-green-400">--</div>
+        </div>
+
+        <div class="status-card">
+          <div class="status-label">Confidence</div>
+          <div id="confidence" class="status-value">-- %</div>
+        </div>
+
+        <div class="status-card">
+          <div class="status-label">Motor Command</div>
+          <div id="motor-cmd" class="status-value text-blue-400">--</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // MQTT Configuration
+      const mqtt_broker = "broker.hivemq.com";
+      const mqtt_port = 8000; // WebSocket port
+      const topic_status = "embedded_sys/face/status";
+      const topic_command = "embedded_sys/face/command";
+
+      client = new Paho.MQTT.Client(
+        mqtt_broker,
+        mqtt_port,
+        "web_client_" + new Date().getTime(),
+      );
+
+      client.onConnectionLost = onConnectionLost;
+      client.onMessageArrived = onMessageArrived;
+
+      client.connect({ onSuccess: onConnect, useSSL: false }); // HiveMQ public broker usually supports ws:// on 8000
+
+      function onConnect() {
+        document.getElementById("mqtt-status").innerText = "Online";
+        document
+          .getElementById("mqtt-status")
+          .classList.replace("text-yellow-400", "text-green-500");
+        console.log("Connected to MQTT Broker");
+        client.subscribe(topic_status);
+        client.subscribe(topic_command);
+      }
+
+      function onConnectionLost(responseObject) {
+        if (responseObject.errorCode !== 0) {
+          console.log("onConnectionLost:" + responseObject.errorMessage);
+          document.getElementById("mqtt-status").innerText = "Offline";
+          document
+            .getElementById("mqtt-status")
+            .classList.replace("text-green-500", "text-red-500");
+        }
+      }
+
+      function onMessageArrived(message) {
+        console.log("Message Arrived: " + message.payloadString);
+
+        if (message.destinationName === topic_status) {
+          try {
+            const data = JSON.parse(message.payloadString);
+            if (data.detected) {
+              document.getElementById("person-name").innerText =
+                data.name || "Unknown";
+              document.getElementById("confidence").innerText =
+                (data.confidence || 0) + "%";
+            } else {
+              document.getElementById("person-name").innerText = "No Face";
+              document.getElementById("confidence").innerText = "--";
+            }
+          } catch (e) {
+            console.error("Error parsing JSON", e);
+          }
+        } else if (message.destinationName === topic_command) {
+          const cmd = message.payloadString;
+          let text = "Stop";
+          if (cmd === "L") text = "Left";
+          if (cmd === "R") text = "Right";
+          document.getElementById("motor-cmd").innerText = text;
+        }
+      }
+    </script>
+  </body>
+</html>
