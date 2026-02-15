@@ -1,12 +1,46 @@
-*.onnx
-*.zip
-venv/Lib/site-packages/absl/flags/__pycache__/_helpers.cpython-313.pyc
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
 venv/
-venv310/
-db/
-enroll/
-node_modules/
-*.pdf
-dp.txt
-models/
-.venv
+ENV/
+
+models/*.onnx
+
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs
+*.log
+install_log.txt
+test_output.txt
+
+# Model files
+*.onnx
+*.h5
+*.pth
+*.pkl
+*.model
