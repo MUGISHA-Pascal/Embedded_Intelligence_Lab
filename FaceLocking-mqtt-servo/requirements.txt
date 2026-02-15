@@ -1,7 +1,0 @@
-opencv-python
-numpy
-onnxruntime
-scipy
-tqdm
-# MediaPipe: 0.10.21 works with Python 3.9–3.12; if "no attribute 'solutions'" use Python 3.11 or fallback (bbox 5pt) is used
-mediapipe==0.10.14

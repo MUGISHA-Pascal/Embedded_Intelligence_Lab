@@ -1,345 +1,293 @@
+# src/face_locking.py
 """
-face_locking.py
+Face Locking extension on recognize.py.
+- Locks to one hardcoded identity (e.g., "Gabi").
+- Tracks stably with centroid + timeout.
+- Detects actions: left/right move (nose x delta), blink (EAR), smile (MAR).
+- Logs history to data/history/<name>_history_<timestamp>.txt.
+Run: python -m src.face_locking
 """
+
+from __future__ import annotations
+
 import time
-import argparse
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import cv2
 import numpy as np
-from pathlib import Path
-from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict
-from enum import Enum
-import mediapipe as mp
+import onnxruntime as ort
+import paho.mqtt.client as mqtt
 
-# Import existing modules
-# We need to ensure we can import from . if run as a module or direct
 try:
-    from .haar_5pt import Haar5ptDetector, align_face_5pt, _bbox_from_5pt, _clip_box_xyxy
-    from .recognize import ArcFaceEmbedderONNX, FaceDBMatcher, load_db_npz
-except ImportError:
-    # If run directly: python src/face_locking.py
-    import sys
-    sys.path.append(str(Path(__file__).parent.parent))
-    from src.haar_5pt import Haar5ptDetector, align_face_5pt, _bbox_from_5pt, _clip_box_xyxy
-    from src.recognize import ArcFaceEmbedderONNX, FaceDBMatcher, load_db_npz
+    import mediapipe as mp
+except Exception as e:
+    mp = None
+    _MP_IMPORT_ERROR = e
 
-# ---------------------------------------------------------
-# Action Logic
-# ---------------------------------------------------------
-@dataclass
-class FaceAction:
-    timestamp: float
-    action_type: str
-    details: str
+# Reuse from recognize.py
+from .haar_5pt import align_face_5pt
+from .recognize import HaarFaceMesh5pt, ArcFaceEmbedderONNX, FaceDBMatcher, FaceDet, MatchResult, cosine_distance
 
-class FaceActionDetector:
-    def __init__(self):
-        # MediaPipe Landmark Indices
-        # Left Eye (for EAR)
-        self.P_LEFT_EYE = [33, 160, 158, 133, 153, 144] 
-        # Right Eye (for EAR)
-        self.P_RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-        # Mouth (for SMILE/MAR) - 61=left corner, 291=right corner, 0=upper lip, 17=lower lip
-        self.P_MOUTH = [61, 291, 0, 17]
-        # Nose for pose
-        self.P_NOSE_TIP = 1
-        
-        # Thresholds
-        self.EAR_THRESH = 0.22  # Below this -> closed
-        self.MAR_THRESH = 0.45  # Above this -> smile/open (simplified smile detection)
-        # Smile can also be detected by mouth corner width relative to face width
+# New for full FaceMesh actions (use same mp as in haar_5pt)
+mp_face_mesh = mp.solutions.face_mesh
 
-        self.last_blink_time = 0.0
-        self.blink_cooldown = 0.3
-        
-        self.last_nose_x = None
+# Config
+TARGET_IDENTITY = "Babou"  # Change to your enrolled name
+LOCK_TIMEOUT_FRAMES = 10
+MOVE_THRESHOLD_PIX = 20
+EAR_BLINK_THRESHOLD = 0.2
+MAR_SMILE_THRESHOLD = 0.30     # Lowered for more sensitivity
+SMILE_WIDTH_THRESHOLD = 1.15   # Mouth width / Eye distance
+HISTORY_DIR = Path("data") / "history"
 
-    def _ear(self, lm, idxs):
-        # eye aspect ratio
-        # vertical dists
-        v1 = np.linalg.norm(lm[idxs[1]] - lm[idxs[5]])
-        v2 = np.linalg.norm(lm[idxs[2]] - lm[idxs[4]])
-        # horizontal
-        h = np.linalg.norm(lm[idxs[0]] - lm[idxs[3]])
-        return (v1 + v2) / (2.0 * h + 1e-6)
+# MQTT Config
+MQTT_BROKER = "157.173.101.159"
+MQTT_PORT = 1883
+MQTT_TOPIC_SERVO = "robotics/team355/servo"
+MQTT_TOPIC_EVENTS = "robotics/team355/events"
 
-    def detect(self, mp_landmarks, frame_w, frame_h) -> List[Tuple[str, str]]:
-        """
-        Input: mp_landmarks (list of normalized x,y,z) from MediaPipe
-        Returns: list of (ActionType, Description)
-        """
-        actions = []
-        now = time.time()
-        
-        # Convert necessary landmarks to np arrays for calculation
-        coords = np.array([[p.x, p.y] for p in mp_landmarks])
-        
-        # 1. Blink Detection
-        left_ear = self._ear(coords, self.P_LEFT_EYE)
-        right_ear = self._ear(coords, self.P_RIGHT_EYE)
-        avg_ear = (left_ear + right_ear) / 2.0
-        
-        if avg_ear < self.EAR_THRESH:
-            if (now - self.last_blink_time) > self.blink_cooldown:
-                actions.append(("BLINK", f"EAR={avg_ear:.2f}"))
-                self.last_blink_time = now
+# Eye landmarks indices (left/right)
+LEFT_EYE_IDXS = [362, 385, 387, 263, 373, 380]
+RIGHT_EYE_IDXS = [33, 160, 158, 133, 153, 144]
 
-        # 2. Smile Detection (Simple width checks or mouth alignment)
-        # Check if mouth corners are 'wide' or mouth is open
-        # Better simple smile: check if corners (61, 291) are higher than usual relative to upper lip (0)?
-        # Or just use mouth width / jaw width ratio?
-        # Let's use simple aspect ratio of mouth for "laugh/smile" (open mouth)
-        # and maybe specific corner comparison for closed smile.
-        # Simplest: Mouth width (61-291) vs Face Width (234-454 for cheeks)
-        left_cheek = coords[234]
-        right_cheek = coords[454]
-        face_width = np.linalg.norm(right_cheek - left_cheek)
-        
-        mouth_l = coords[61]
-        mouth_r = coords[291]
-        mouth_width = np.linalg.norm(mouth_r - mouth_l)
-        
-        ratio = mouth_width / (face_width + 1e-6)
-        if ratio > 0.45: # Tweak this
-             actions.append(("SMILE", f"ratio={ratio:.2f}"))
+# Mouth landmarks
+MOUTH_CORNER_LEFT = 61
+MOUTH_CORNER_RIGHT = 291
+MOUTH_TOP = 0
+MOUTH_BOTTOM = 17
+MOUTH_IDXS = [MOUTH_CORNER_LEFT, MOUTH_CORNER_RIGHT, 13, 14]
 
-        # 3. Head Movement (Left/Right)
-        # Check nose x relative to frame center (0.5 in normalized coords)
-        nose = coords[self.P_NOSE_TIP]
-        if nose[0] < 0.50:
-             actions.append(("MOVE_LEFT", f"nose_x={nose[0]:.2f}"))
-        elif nose[0] > 0.60:
-             actions.append(("MOVE_RIGHT", f"nose_x={nose[0]:.2f}"))
-             
-        return actions
+def compute_ear(eye_pts):
+    vert1 = np.linalg.norm(eye_pts[1] - eye_pts[5])
+    vert2 = np.linalg.norm(eye_pts[2] - eye_pts[4])
+    horiz = np.linalg.norm(eye_pts[0] - eye_pts[3])
+    return (vert1 + vert2) / (2 * horiz + 1e-6)
 
-# ---------------------------------------------------------
-# Face Locking System
-# ---------------------------------------------------------
-class LockState(Enum):
-    SEARCHING = 0
-    LOCKED = 1
-    # Could add LOST_RECOVERING state if we want hysteresis
-
-class FaceLockSystem:
-    def __init__(self, target_name: str, matcher: FaceDBMatcher, detector: Haar5ptDetector):
-        self.target_name = target_name
-        self.matcher = matcher
-        self.det = detector
-        self.state = LockState.SEARCHING
-        
-        self.action_det = FaceActionDetector()
-        self.history: List[FaceAction] = []
-        
-        self.locked_frames = 0
-        self.lost_frames = 0
-        self.MAX_LOST_FRAMES = 10  # Tolerance before unlocking
-        
-        # We need to store the session file name
-        ts = time.strftime("%Y%m%d%H%M%S")
-        safe_name = "".join(c for c in target_name if c.isalnum())
-        self.history_file = Path(f"{safe_name}_history_{ts}.txt")
-        
-        print(f"[FaceLock] Initialized. Target: {target_name}. Log: {self.history_file}")
-
-    def log_action(self, atype: str, details: str):
-        now = time.time()
-        # Avoid spamming movement logs? Maybe only log on change?
-        # For assignment, "record a history" is key.
-        # We can implement a simple deduplication: don't log same action within 0.5s
-        if self.history:
-            last = self.history[-1]
-            if last.action_type == atype and (now - last.timestamp) < 1.0:
-                return
-
-        act = FaceAction(timestamp=now, action_type=atype, details=details)
-        self.history.append(act)
-        
-        line = f"{time.strftime('%H:%M:%S', time.localtime(now))} | {atype} | {details}\n"
-        with open(self.history_file, "a", encoding="utf-8") as f:
-            f.write(line)
-        print(f">> ACTION: {atype} ({details})")
-
-    def process_frame(self, frame: np.ndarray, embedder: ArcFaceEmbedderONNX) -> Tuple[np.ndarray, Optional[object]]:
-        vis = frame.copy()
-        H, W = vis.shape[:2]
-
-        faces, mp_res = self.det.detect_with_mesh(frame, max_faces=5)
-
-        # 1. Process all faces to find matches
-        # We want to identify everyone, but only "lock" on the target.
-        target_face = None
-        target_sim = 0.0
-
-        for f in faces:
-            # Default gray box for unknown/processing
-            cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (100, 100, 100), 1)
-
-            aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
-            emb = embedder.embed(aligned)
-            mr = self.matcher.match(emb)
-
-            if mr.accepted:
-                # It is a known person
-                is_target = (mr.name == self.target_name)
-                
-                if is_target:
-                    # Keep track of the best target candidate
-                    if mr.similarity > target_sim:
-                        target_sim = mr.similarity
-                        target_face = f
-                else:
-                    # Just label other known people immediately
-                    cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (255, 200, 0), 2) # Cyan/Gold
-                    cv2.putText(
-                        vis,
-                        mr.name,
-                        (f.x1, f.y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (255, 200, 0),
-                        2
-                    )
-
-        # 2. State Machine Logic for Target
-        
-        # Handle state transitions based on whether target was found this frame
-        if self.state == LockState.SEARCHING:
-            cv2.putText(
-                vis,
-                f"SEARCHING: {self.target_name}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 165, 255),
-                2
-            )
-
-            if target_face is not None:
-                self.state = LockState.LOCKED
-                self.lost_frames = 0
-                self.log_action("LOCK_ACQUIRED", f"sim={target_sim:.2f}")
-
-        # Note: If we just transitioned to LOCKED, we fall through to this block if we use 'if' 
-        # But usually we wait for next frame or handle it now. 
-        # Let's handle it now (or next frame). The original code used elif, so it waited.
-        # Let's use 'if' so we immediately start tracking if found.
-        if self.state == LockState.LOCKED:
-            if target_face is not None:
-                self.lost_frames = 0
-                f = target_face
-                
-                # Highlight Target
-                cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (0, 255, 0), 3)
-                cv2.putText(
-                    vis,
-                    f"TARGET: {self.target_name}",
-                    (f.x1, f.y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    2
-                )
-                
-                # Action Detection on Target
-                if mp_res and mp_res.multi_face_landmarks:
-                    fw_x, fw_y = (f.x1 + f.x2) / 2, (f.y1 + f.y2) / 2
-                    best_lm = None
-                    min_dist = float("inf")
-
-                    for lm_list in mp_res.multi_face_landmarks:
-                        nose = lm_list.landmark[1]
-                        nx, ny = nose.x * W, nose.y * H
-                        dist = ((nx - fw_x) ** 2 + (ny - fw_y) ** 2) ** 0.5
-
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_lm = lm_list.landmark
-
-                    if best_lm and min_dist < max(f.x2 - f.x1, f.y2 - f.y1):
-                        actions = self.action_det.detect(best_lm, W, H)
-                        for atype, desc in actions:
-                            self.log_action(atype, desc)
-                            cv2.putText(
-                                vis,
-                                f"ACT: {atype}",
-                                (10, H - 40),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.7,
-                                (0, 255, 255),
-                                2
-                            )
-            else:
-                # Target not found this frame
-                self.lost_frames += 1
-                cv2.putText(
-                    vis,
-                    f"LOCKED: {self.target_name}", # Header matches
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 255, 0),
-                    2
-                )
-                cv2.putText(
-                    vis,
-                    f"LOST ({self.lost_frames}/{self.MAX_LOST_FRAMES})",
-                    (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2
-                )
-
-                if self.lost_frames > self.MAX_LOST_FRAMES:
-                    self.state = LockState.SEARCHING
-                    self.log_action("LOCK_LOST", "Target disappeared")
-
-        return vis, target_face
-
+def compute_mar(mouth_pts):
+    vert = np.linalg.norm(mouth_pts[2] - mouth_pts[3])
+    horiz = np.linalg.norm(mouth_pts[0] - mouth_pts[1])
+    return vert / (horiz + 1e-6)
 
 def main():
-    cfg = argparse.ArgumentParser()
-    cfg.add_argument("--name", type=str, default="andrew", help="Target identity to lock onto")
-    args = cfg.parse_args()
-    
-    # Init
     db_path = Path("data/db/face_db.npz")
-    if not db_path.exists():
-        print("No database found! Please run enroll.py first.")
-        return
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
-    det = Haar5ptDetector(min_size=(70, 70), debug=False)
-    embedder = ArcFaceEmbedderONNX(input_size=(112, 112))
-    
+    det = HaarFaceMesh5pt(min_size=(70, 70), debug=False)
+    embedder = ArcFaceEmbedderONNX("models/embedder_arcface.onnx", (112, 112), debug=False)
     db = load_db_npz(db_path)
-    if args.name not in db:
-        print(f"Warning: '{args.name}' not in database. Available: {list(db.keys())}")
-        # Proceed anyway? No, impossible to lock.
-        # But let's allow it to start scanning so user can see failures.
-    
-    matcher = FaceDBMatcher(db, dist_thresh=0.60)
-    
-    system = FaceLockSystem(args.name, matcher, det)
-    
+    matcher = FaceDBMatcher(db, dist_thresh=0.61)
+
+    full_mesh = mp_face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+
+    # MQTT Client Setup
+    client = mqtt.Client()
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_start()
+        print(f"Connected to MQTT Broker at {MQTT_BROKER}")
+    except Exception as e:
+        print(f"Failed to connect to MQTT: {e}")
+        client = None
+
     cap = cv2.VideoCapture(1)
-    print("Mask Locking System Started. Press 'q' to quit.")
+    if not cap.isOpened():
+        raise RuntimeError("Camera not available")
+
+    print(f"Face Locking for '{TARGET_IDENTITY}'. q=quit, r=reload DB")
+
+    locked_face: Optional[FaceDet] = None
+    lock_timeout = 0
+    prev_nose_x: Optional[float] = None
+    history_file: Optional[Path] = None
     
+    # UI feedback state
+    active_actions = {}  # type: Dict[str, float] (action -> expiry_time)
+
+    t0 = time.time()
+    frames = 0
+    fps: Optional[float] = None
+
     while True:
         ok, frame = cap.read()
-        if not ok: break
-        
-        # Mirror the frame (user requested to "remove" the flip, implying they want the opposite of current)
-        frame = cv2.flip(frame, 1)
-        
-        vis, _ = system.process_frame(frame, embedder)
-        
-        cv2.imshow("Face Locking", vis)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if not ok:
             break
-            
+
+        faces = det.detect(frame, max_faces=5)
+        vis = frame.copy()
+        now = time.time()
+
+        # FPS calc
+        frames += 1
+        dt = now - t0
+        if dt >= 1.0:
+            fps = frames / dt
+            frames = 0
+            t0 = now
+
+        if locked_face:
+            # Stable tracking
+            if faces:
+                prev_center = ((locked_face.x1 + locked_face.x2) / 2, (locked_face.y1 + locked_face.y2) / 2)
+                dists = [np.linalg.norm(((f.x1 + f.x2) / 2 - prev_center[0], (f.y1 + f.y2) / 2 - prev_center[1])) for f in faces]
+                closest_face = faces[np.argmin(dists)]
+
+                aligned, _ = align_face_5pt(frame, closest_face.kps, (112, 112))
+                emb = embedder.embed(aligned)
+                mr = matcher.match(emb)
+
+                if mr.name == TARGET_IDENTITY or lock_timeout < LOCK_TIMEOUT_FRAMES:
+                    locked_face = closest_face
+                    lock_timeout = 0 if mr.name == TARGET_IDENTITY else lock_timeout + 1
+                else:
+                    locked_face = None
+            else:
+                lock_timeout += 1
+                if lock_timeout >= LOCK_TIMEOUT_FRAMES:
+                    locked_face = None
+                    if history_file:
+                        print(f"Lock released. History saved to {history_file}")
+                        history_file = None
+
+            if locked_face:
+                # Draw lock
+                cv2.rectangle(vis, (locked_face.x1, locked_face.y1), (locked_face.x2, locked_face.y2), (0, 0, 255), 3)
+                cv2.putText(vis, f"LOCKED: {TARGET_IDENTITY}", (locked_face.x1, locked_face.y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+                # FaceMesh for actions
+                rx1, ry1, rx2, ry2 = locked_face.x1, locked_face.y1, locked_face.x2, locked_face.y2
+                roi = frame[ry1:ry2, rx1:rx2]
+                rgb_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+                res = full_mesh.process(rgb_roi)
+
+                if res.multi_face_landmarks:
+                    lm = res.multi_face_landmarks[0].landmark
+                    H, W = roi.shape[:2]
+                    pts = np.array([[lm[i].x * W + rx1, lm[i].y * H + ry1] for i in range(len(lm))])
+
+                    # 1. Nose Movement
+                    nose_x = pts[1][0]
+                    if prev_nose_x is not None:
+                        delta_x = nose_x - prev_nose_x
+                        if abs(delta_x) > MOVE_THRESHOLD_PIX:
+                            action = "MOVE RIGHT" if delta_x > 0 else "MOVE LEFT"
+                            log_action(history_file, action.lower(), f"Delta x: {delta_x:.1f}")
+                            active_actions[action] = now + 1.0
+                            
+                            # Publish Servo Angle
+                            if client:
+                                # Map face position to servo angle (0-180)
+                                # W is ROI width. pts[1][0] is nose x in Screen space.
+                                # Let's use relative position in ROI.
+                                rel_x = (nose_x - rx1) / W # 0.0 (left) to 1.0 (right)
+                                angle = int((1.0 - rel_x) * 180) # Invert if needed for servo direction
+                                angle = max(0, min(180, angle))
+                                payload = json.dumps({"angle": angle, "nose_x": float(nose_x)})
+                                client.publish(MQTT_TOPIC_SERVO, payload)
+                    prev_nose_x = nose_x
+
+                    # 2. Blink Detection
+                    ear = (compute_ear(pts[LEFT_EYE_IDXS]) + compute_ear(pts[RIGHT_EYE_IDXS])) / 2.0
+                    if ear < EAR_BLINK_THRESHOLD:
+                        log_action(history_file, "eye blink", f"EAR: {ear:.2f}")
+                        active_actions["BLINK"] = now + 0.5
+
+                    # 3. Improved Smile Detection
+                    # Metric A: MAR (Open mouth)
+                    mar = compute_mar(pts[MOUTH_IDXS])
+                    
+                    # Metric B: Mouth Width ratio (relative to eyes)
+                    eye_dist = np.linalg.norm(pts[33] - pts[263])
+                    mouth_width = np.linalg.norm(pts[61] - pts[291])
+                    smile_width_ratio = mouth_width / (eye_dist + 1e-6)
+                    
+                    # Metric C: Corner elevation (curvature)
+                    mouth_center_y = (pts[0][1] + pts[17][1]) / 2.0
+                    corner_y = (pts[61][1] + pts[291][1]) / 2.0
+                    smile_curve = mouth_center_y - corner_y # Positive if corners are above mouth center
+
+                    is_smiling = False
+                    reason = ""
+                    if mar > MAR_SMILE_THRESHOLD:
+                        is_smiling, reason = True, f"MAR:{mar:.2f}"
+                    elif smile_width_ratio > SMILE_WIDTH_THRESHOLD:
+                        is_smiling, reason = True, f"Width:{smile_width_ratio:.2f}"
+                    elif smile_curve > 5.0: # Corners are significantly higher than mouth center
+                        is_smiling, reason = True, f"Curve:{smile_curve:.1f}"
+
+                    if is_smiling:
+                        log_action(history_file, "smile", reason)
+                        active_actions["SMILE"] = now + 1.0
+                        if client:
+                            client.publish(MQTT_TOPIC_EVENTS, json.dumps({"event": "smile", "reason": reason}))
+                        # Visual: highlight mouth
+                        for idx in [61, 291, 0, 17]:
+                            cv2.circle(vis, (int(pts[idx][0]), int(pts[idx][1])), 3, (0, 255, 255), -1)
+
+                if history_file is None:
+                    ts = time.strftime("%Y%m%d%H%M%S")
+                    history_file = HISTORY_DIR / f"{TARGET_IDENTITY.lower()}_history_{ts}.txt"
+                    log_action(history_file, "lock started", "Face locked")
+
+        else:
+            # Normal recognition
+            for f in faces:
+                aligned, _ = align_face_5pt(frame, f.kps, (112, 112))
+                emb = embedder.embed(aligned)
+                mr = matcher.match(emb)
+                if mr.name == TARGET_IDENTITY and mr.accepted:
+                    locked_face, lock_timeout = f, 0
+                    print(f"Locked onto {TARGET_IDENTITY}")
+                    break
+                
+                color = (0, 255, 0) if mr.accepted else (0, 0, 255)
+                cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), color, 2)
+                cv2.putText(vis, mr.name if mr.accepted else "Unknown", (f.x1, f.y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        # Draw active actions UI
+        y_offset = 70
+        for action, expiry in list(active_actions.items()):
+            if now < expiry:
+                cv2.putText(vis, action, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+                y_offset += 45
+            else:
+                del active_actions[action]
+
+        # Header info
+        header = f"IDs={len(matcher._names)}  thr={matcher.dist_thresh:.2f}"
+        if fps: header += f" fps={fps:.1f}"
+        cv2.putText(vis, header, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
+
+        cv2.imshow("face_locking", vis)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"): break
+        elif key == ord("r"): matcher.reload_from(db_path)
+
     cap.release()
     cv2.destroyAllWindows()
+
+# Logging helper
+def log_action(file_path: Path, action_type: str, desc: str):
+    if file_path:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with file_path.open("a") as f:
+            f.write(f"{ts} - {action_type} - {desc}\n")
+
+# Load_db_npz from recognize.py (add if not in file)
+def load_db_npz(db_path: Path) -> Dict[str, np.ndarray]:
+    if not db_path.exists():
+        return {}
+    data = np.load(str(db_path), allow_pickle=True)
+    out = {k: np.asarray(data[k], dtype=np.float32).reshape(-1) for k in data.files}
+    return out
 
 if __name__ == "__main__":
     main()

@@ -1,134 +1,134 @@
-# Face Recognition with ArcFace ONNX and 5-Point Alignment
+# Distributed Vision-Control System (Phase 1)
+**Course:** Intelligent Robotics  
+**Phase:** Phase 1 (Open-Loop Actuation)  
+**Team ID:** team355 
 
-<img src="https://via.placeholder.com/800x200/007bff/ffffff?text=ArcFace+ONNX+%2B+5-Point+Alignment" alt="Project Banner" width="800"/>
+This project implements a distributed system where a PC tracks a face and sends movement commands to an ESP8266-controlled servo motor via an MQTT broker.
 
-**Author:** Andrew Byukusenge  
-**Instructor:** Gabriel Baziramwabo  
-**Organization:** Rwanda Coding Academy  
+---
 
-This project implements a **Distributed Face Recognition and Tracking System** for IoT-based servo control using:
+## 1. Prerequisites
 
-- **ArcFace** model (ONNX) for face recognition
-- **5-point facial landmark alignment** for precise face detection
-- **MQTT** for distributed communication between components
-- **ESP8266** microcontroller for edge-based servo control
-- **Real-time Web Dashboard** for system monitoring
+### Hardware
+*   **ESP8266 Board** (NodeMCU or similar)
+*   **Micro-USB Cable**
+*   **Servo Motor** (SG90 or similar)
+*   **Jumper Wires**
+*   **PC with Webcam**
 
-The system is designed for **embedded systems applications**, demonstrating how computer vision, IoT communication, and edge computing work together in a practical face-tracking servo control system.
+### Software
+*   **Python 3.11+**
+*   **Arduino IDE**
+*   **MQTT Broker Access** (IP: `157.173.101.159`)
 
-## Table of Contents
+---
 
-- [Assessment Details (Week 06)](#assessment-details-week-06)
-- [System Architecture](#system-architecture)
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
+## 2. PC Setup (Vision Engine)
 
-## System Architecture
-
-This distributed system consists of four main components:
-
-1. **Vision Node (PC)**: Detects, recognizes, and tracks faces using ArcFace and MediaPipe. Publishes movement commands via MQTT.
-2. **MQTT Broker (VPS)**: Central message broker facilitating communication between all components.
-3. **ESP8266 (Edge Controller)**: Subscribes to movement commands and controls a servo motor to physically track the detected face.
-4. **Web Dashboard**: Real-time visualization of system status, tracking data, and lock status.
-
-## Features
-
-- **Face Recognition & Locking**: Lock onto a specific enrolled identity and track their movements
-- **Distributed Architecture**: Components communicate via MQTT, allowing flexible deployment
-- **Real-time Servo Control**: ESP8266 controls servo motor based on face position
-- **Live Dashboard**: Web-based monitoring with WebSocket updates
-- **Action Detection**: Detects blinks, smiles, and head movements
-- **CPU-friendly**: Runs on standard laptops without GPU requirements
-
-## Project Structure
-
-```
-Face_recognition_with_Arcface/
-├── src/
-│   ├── vision_node.py       # Main vision processing + MQTT publisher
-│   ├── face_locking.py      # Face locking & action detection
-│   ├── haar_5pt.py          # Face detection core
-│   └── recognize.py         # ArcFace recognition
-├── backend/
-│   ├── server.js            # MQTT-to-WebSocket relay
-│   └── package.json
-├── dashboard/
-│   └── index.html           # Real-time web dashboard
-├── esp8266/
-│   └── vision_servo/
-│       └── vision_servo.ino # Arduino firmware for ESP8266
-├── data/
-│   └── db/                  # Face database (face_db.npz)
-└── models/
-    └── embedder_arcface.onnx
-```
-
-## Quick Start
-
-### 1. Install Dependencies
+### Step 1: Clone and Create Virtual Environment
 ```bash
-pip install -r requirements.txt
-cd backend && npm install
+# Open PowerShell or Terminal in the project folder
+python -m venv .venv
+.venv\Scripts\activate
 ```
 
-### 2. Enroll Your Face
+### Step 2: Install Dependencies
 ```bash
-python -m src.enroll --name andrew
+pip install --upgrade pip
+pip install opencv-python numpy onnxruntime mediapipe==0.10.21 paho-mqtt
 ```
 
-### 3. Start the System
-
-**On VPS (or local MQTT broker):**
+### Step 3: Download ArcFace Model
+The system requires the ArcFace ONNX model for face recognition.
 ```bash
-mosquitto -c mosquitto.conf
+mkdir models
+# Manually download or use curl if available:
+curl -L -o models/embedder_arcface.onnx "https://github.com/yakhyo/facial-analysis/releases/download/v0.0.1/w600k_r50.onnx"
 ```
 
-**On PC - Terminal 1 (Backend):**
+### Step 4: Personnel Enrollment
+Before tracking, you must enroll the target face:
+1. Run the enrollment script:
+   ```bash
+   python src/enroll.py
+   ```
+2. Enter the name (e.g., `Babou`).
+3. Press `s` to capture samples and `q` to finish.
+4. Verify that `data/db/face_db.npz` is created.
+
+---
+
+## 3. ESP8266 Setup (Edge Controller)
+
+### Step 1: Hardware Wiring
+Connect the servo to the ESP8266:
+*   **Brown/Black Wire**: `GND`
+*   **Red Wire**: `VIN` (5V power from USB)
+*   **Orange/Yellow Wire**: `D4` (GPIO2)
+
+### Step 2: Arduino IDE Configuration
+1. Install **ESP8266 Board Support**:
+   *   Settings -> Additional Boards Manager URLs -> `http://arduino.esp8266.com/stable/package_esp8266com_index.json`
+   *   Tools -> Board -> Boards Manager -> Search `esp8266` and install.
+2. Install **Required Libraries**:
+   *   Tools -> Manage Libraries -> Search and install:
+       *   `PubSubClient` (by Nick O'Leary)
+       *   `ArduinoJson` (by Benoit Blanchon)
+
+### Step 3: Flash Firmware
+1. Open `src/esp8266_servo.ino`.
+2. Update the WiFi credentials:
+   ```cpp
+   const char* ssid = "YOUR_WIFI_NAME";
+   const char* password = "YOUR_WIFI_PASSWORD";
+   ```
+3. Select your board (e.g., `NodeMCU 1.0`) and Port.
+4. Click **Upload**.
+
+---
+
+## 4. Running the System
+
+### Step 1: Start the Vision Engine
+Ensure your webcam is connected and the ESP8266 is powered on.
 ```bash
-cd backend
-npm start
+# In your terminal (with .venv active)
+python src/face_locking.py
 ```
+*   **Controls**: `q` to quit, `r` to reload the face database.
+*   **Logic**: Once the target face is recognized and "LOCKED", the PC will begin publishing angles to `robotics/team355/servo`.
 
-**On PC - Terminal 2 (Vision Node):**
+### Step 2: Monitor Output
+*   **PC Console**: Should show "Connected to MQTT Broker".
+*   **Arduino Serial Monitor**: Should show "WiFi connected" and "Moving servo to: [Angle]".
+
+---
+
+## 5. Technical Details
+
+### Topic Isolation
+To avoid interference with other teams, this project uses a dedicated prefix:
+*   **Command Topic**: `robotics/team355/servo`
+*   **Event Topic**: `robotics/team355/events`
+
+### Data Format (JSON)
+The PC sends JSON payloads over MQTT:
+```json
+{
+  "angle": 90,
+  "nose_x": 320.5
+}
+```
+## 6. Supplementary (Optional Dashboard)
+A real-time web dashboard is available in `dashboard/index.html`. 
+To host it persistently on your VPS:
 ```bash
-python src/vision_node.py --broker 157.173.101.159 --name andrew
+# Connect to VPS
+ssh user355@157.173.101.159
+# Run the server in a persistent background process
+nohup python3 -m http.server 9335 --directory ~/site >> ~/site/http.log 2>&1 &
 ```
+Access at `http://157.173.101.159:9335`.
 
-### 4. Flash ESP8266
-Upload `esp8266/vision_servo/vision_servo.ino` using Arduino IDE.
-
-### 5. Access Dashboard
-Open: [http://157.173.101.159:9313]([http://157.173.101.159:9313/])
-
-## Assessment Details (Week 06)
-
-### System Description
-This project implements a **Distributed Face Recognition and Locking System** using:
-1.  **Vision Node (PC)**: Detects, recognizes, and tracks faces using ArcFace and MediaPipe. Publishes movement commands.
-2.  **MQTT Broker (VPS)**: Facilitates communication between the PC, ESP8266, and Dashboard.
-3.  **ESP8266 (Edge)**: Subscribes to movement commands and controls a Servo motor to track the face.
-4.  **Web Dashboard**: Visualizes the real-time blocking status and tracking info.
-
-### MQTT Topics
--   `vision/team313/movement`: JSON payload with `status` (MOVE_LEFT, MOVE_RIGHT, CENTERED), `target`, and `locked` state.
--   `vision/team313/heartbeat`: System health status.
-
-### Live Dashboard
-**URL**: [http://157.173.101.159:8082]([http://157.173.101.159:9313/])
-
-## Face Locking
-The new Face Locking feature (`src/face_locking.py` and `vision_node.py`) allows you to track a single enrolled identity continuously.
-
-**How it works:**
-1.  **Search**: The system looks for the user using ArcFace recognition.
-2.  **Lock**: Once found, it tracks the user's face position.
-3.  **Action Detection**: It measures facial landmarks to detect:
-    - **Blinks**: Using Eye Aspect Ratio (EAR).
-    - **Smiles**: Using mouth width ratios.
-    - **Movement**: Using nose position (Left/Right).
-
-**History**:
-A file named `<name>_history_<timestamp>.txt` is created to record all detected actions.
+---
+*Assignment Phase 1 - Distributed Vision-Control*
