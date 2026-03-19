@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 MIN_AREA = 600
 AR_MIN, AR_MAX = 2.0, 8.0
