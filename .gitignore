@@ -2,3 +2,5 @@ venv/
 dataset/
 enroll/
 data/
+config.bat
+node_modules
